@@ -1,5 +1,7 @@
 package com.moa1er.androidremotecontroller;
 
+import android.os.Process;
+
 import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -37,6 +39,7 @@ final class AdbTransport implements Closeable {
     private final Map<Integer, AdbStream> streams = new ConcurrentHashMap<>();
     private final AtomicInteger nextLocalId = new AtomicInteger(1);
     private final SocketFactory socketFactory;
+    private final boolean latencySensitive;
     private Socket socket;
     private DataInputStream input;
     private DataOutputStream output;
@@ -44,11 +47,20 @@ final class AdbTransport implements Closeable {
     private volatile int maxData = MAX_DATA;
 
     AdbTransport() {
-        this(Socket::new);
+        this(Socket::new, false);
+    }
+
+    AdbTransport(boolean latencySensitive) {
+        this(Socket::new, latencySensitive);
     }
 
     AdbTransport(SocketFactory socketFactory) {
+        this(socketFactory, false);
+    }
+
+    AdbTransport(SocketFactory socketFactory, boolean latencySensitive) {
         this.socketFactory = socketFactory;
+        this.latencySensitive = latencySensitive;
     }
 
     void connect(String host, int port, AdbAuthKey authKey) throws IOException {
@@ -113,7 +125,17 @@ final class AdbTransport implements Closeable {
                 maxData = packet.arg1 > 0 ? Math.min(packet.arg1, MAX_DATA) : MAX_DATA;
             }
 
-            new Thread(this::readLoop, "adb-transport-reader").start();
+            Thread reader = new Thread(() -> {
+                if (latencySensitive) {
+                    try {
+                        Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+                    } catch (RuntimeException ignored) {
+                        // the reader can still make progress with its inherited priority.
+                    }
+                }
+                readLoop();
+            }, "adb-transport-reader");
+            reader.start();
         } catch (IOException | RuntimeException error) {
             closeCandidate(candidate);
             throw error;

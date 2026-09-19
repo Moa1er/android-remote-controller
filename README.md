@@ -5,9 +5,12 @@ TCP when a desktop computer is not available.
 
 The controller app implements the Android-side ADB transport, authentication,
 saved connections, video rendering, touch input, app launching, and adaptive
-resolution. It builds the existing scrcpy server module included in this
-repository and uses the scrcpy video and control protocols. This repository is
-an independent project and is not maintained by Genymobile.
+resolution. It uses a separate ADB transport for controls, selects a hardware
+AVC decoder with low-latency settings when available, and uses a bandwidth-
+friendly 4 Mbps stream baseline without reducing the configured resolution.
+It builds the existing scrcpy server module included in this repository and
+uses the scrcpy video and control protocols. This repository is an independent
+project and is not maintained by Genymobile.
 
 ## Build
 

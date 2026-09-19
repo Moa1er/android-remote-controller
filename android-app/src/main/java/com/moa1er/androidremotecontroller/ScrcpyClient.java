@@ -1,8 +1,11 @@
 package com.moa1er.androidremotecontroller;
 
 import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.MotionEvent;
@@ -28,8 +31,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class ScrcpyClient implements Closeable {
     private static final String TAG = "ScrcpyClient";
     private static final long SHELL_COMMAND_TIMEOUT_MS = 10_000L;
-    private static final int VIDEO_BIT_RATE = 8_000_000;
+    // keep the stream within the range used by comparable Android clients. A
+    // a lower bitrate reduces Wi-Fi and ADB queueing without changing resolution.
+    private static final int VIDEO_BIT_RATE = 4_000_000;
     private static final int VIDEO_MAX_FPS = 60;
+    private static final float TOUCH_MOVE_MIN_DELTA = 3f;
     private static final int VIDEO_MIN_AUTO_SIZE = 720;
     private static final int VIDEO_AUTO_STEP = 160;
     private static final long VIDEO_SLOW_PACKET_MILLIS = 350L;
@@ -66,8 +72,11 @@ final class ScrcpyClient implements Closeable {
     private final Object touchLock = new Object();
     private TouchEvent pendingMove;
     private boolean moveDrainQueued;
+    private float lastTouchX;
+    private float lastTouchY;
+    private boolean touchActive;
     private volatile AdbTransport adb;
-    // Keep control traffic independent from the high-volume video transport.
+    // keep control traffic independent from the high-volume video transport.
     private volatile AdbTransport controlAdb;
     private volatile AdbTransport.AdbStream shell;
     private volatile AdbTransport.AdbStream video;
@@ -119,7 +128,7 @@ final class ScrcpyClient implements Closeable {
                 listener.onStatus(R.string.status_opening_streams);
                 AdbTransport.AdbStream openedVideo = openLocalSocket(transport, socketName);
                 adoptVideo(openedVideo);
-                AdbTransport separateControlTransport = new AdbTransport();
+                AdbTransport separateControlTransport = new AdbTransport(true);
                 adoptControlAdb(separateControlTransport);
                 separateControlTransport.connect(host, port, authKey);
                 AdbTransport.AdbStream openedControl = openLocalSocket(
@@ -268,6 +277,11 @@ final class ScrcpyClient implements Closeable {
 
     private void decodeVideo(Surface surface, int width, int height,
             AdbTransport.AdbStream videoStream) {
+        try {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+        } catch (RuntimeException ignored) {
+            // a decoder thread can still make progress with its inherited priority.
+        }
         MediaCodec decoder = null;
         boolean firstFrameReported = false;
         Throwable failure = null;
@@ -372,21 +386,77 @@ final class ScrcpyClient implements Closeable {
 
     private static MediaCodec createDecoder(Surface surface, int width, int height)
             throws IOException {
+        MediaFormat format = MediaFormat.createVideoFormat(
+                MediaFormat.MIMETYPE_VIDEO_AVC, width, height);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            format.setInteger(MediaFormat.KEY_PRIORITY, 0);
+        }
+
+        String decoderName = findHardwareDecoder();
         MediaCodec decoder = null;
         try {
-            MediaFormat format = MediaFormat.createVideoFormat(
-                    MediaFormat.MIMETYPE_VIDEO_AVC, width, height);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
-            }
-            decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+            decoder = decoderName == null
+                    ? MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    : MediaCodec.createByCodecName(decoderName);
             decoder.configure(format, surface, null, 0);
             decoder.start();
             return decoder;
         } catch (Exception error) {
             releaseDecoder(decoder);
-            throw new IOException("Could not configure the video decoder", error);
+            try {
+                decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+                decoder.configure(format, surface, null, 0);
+                decoder.start();
+                return decoder;
+            } catch (Exception fallbackError) {
+                releaseDecoder(decoder);
+                fallbackError.addSuppressed(error);
+                throw new IOException("Could not configure the video decoder", fallbackError);
+            }
         }
+    }
+
+    private static String findHardwareDecoder() {
+        String fallback = null;
+        try {
+            MediaCodecList codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+            for (MediaCodecInfo codecInfo : codecList.getCodecInfos()) {
+                if (codecInfo.isEncoder()) {
+                    continue;
+                }
+                boolean supportsAvc = false;
+                for (String type : codecInfo.getSupportedTypes()) {
+                    if (MediaFormat.MIMETYPE_VIDEO_AVC.equalsIgnoreCase(type)) {
+                        supportsAvc = true;
+                        break;
+                    }
+                }
+                if (!supportsAvc) {
+                    continue;
+                }
+
+                String name = codecInfo.getName();
+                String lowerName = name.toLowerCase(Locale.US);
+                if (lowerName.startsWith("omx.google")
+                        || lowerName.startsWith("c2.android")
+                        || lowerName.contains("software")) {
+                    continue;
+                }
+                if (lowerName.contains("low_latency")) {
+                    return name;
+                }
+                if (fallback == null || (lowerName.contains("c2")
+                        && !fallback.toLowerCase(Locale.US).contains("c2"))) {
+                    fallback = name;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+        return fallback;
     }
 
     private static void releaseDecoder(MediaCodec decoder) {
@@ -422,9 +492,25 @@ final class ScrcpyClient implements Closeable {
         if (writer == null) {
             return;
         }
+        synchronized (touchLock) {
+            if (action == MotionEvent.ACTION_DOWN) {
+                touchActive = true;
+                lastTouchX = x;
+                lastTouchY = y;
+            } else if (action == MotionEvent.ACTION_MOVE) {
+                if (touchActive && Math.abs(x - lastTouchX) < TOUCH_MOVE_MIN_DELTA
+                        && Math.abs(y - lastTouchY) < TOUCH_MOVE_MIN_DELTA) {
+                    return;
+                }
+                lastTouchX = x;
+                lastTouchY = y;
+            } else if (action == MotionEvent.ACTION_UP) {
+                touchActive = false;
+            }
+        }
         TouchEvent event = new TouchEvent(action, x, y, pressure, width, height);
         if (action == MotionEvent.ACTION_MOVE) {
-            // Do not let delayed ADB acknowledgements build a stale move backlog.
+            // do not let delayed ADB acknowledgements build a stale move backlog.
             synchronized (touchLock) {
                 pendingMove = event;
                 if (moveDrainQueued) {

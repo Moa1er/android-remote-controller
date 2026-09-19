@@ -10,6 +10,9 @@ with Android Keystore in private app storage, pushes the matching scrcpy server
 to the target, and renders the target video with Android `MediaCodec`. It uses
 one authenticated ADB connection for the shell and video stream, and a second
 one for control input so video traffic does not delay touch events.
+The client also prefers a hardware AVC decoder with low-latency settings and
+uses a 4 Mbps stream baseline to reduce wireless queueing without lowering the
+configured video resolution.
 
 ## Build
 
