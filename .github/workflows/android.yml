@@ -89,4 +89,7 @@ jobs:
           ram-size: 2048M
           heap-size: 512M
           disable-animations: true
-          script: ./gradlew :android-app:connectedDebugAndroidTest
+          script: |
+            adb shell input keyevent KEYCODE_WAKEUP
+            adb shell wm dismiss-keyguard || true
+            ./gradlew :android-app:connectedDebugAndroidTest

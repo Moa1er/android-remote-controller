@@ -79,12 +79,9 @@ public final class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         preferences = getSharedPreferences("connection-profiles", MODE_PRIVATE);
         loadProfiles();
-        try {
-            authKey = new AdbAuthKey(this);
-        } catch (IOException e) {
-            Log.e(TAG, "Could not create the ADB authentication key", e);
-            authKey = null;
-        }
+        // create the ADB key only when a connection is requested. Keystore work must not
+        // delay the main screen or UI tests.
+        authKey = null;
         buildUi();
     }
 
