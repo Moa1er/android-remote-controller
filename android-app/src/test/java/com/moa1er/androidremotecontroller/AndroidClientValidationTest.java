@@ -42,4 +42,16 @@ public final class AndroidClientValidationTest {
         assertTrue(AndroidClientValidation.isValidVideoMaxSize(1280));
         assertFalse(AndroidClientValidation.isValidVideoMaxSize(600));
     }
+
+    @Test
+    public void validatesDirectTcpPortOnlyWhenDirectModeIsEnabled() {
+        assertTrue(AndroidClientValidation.isValidProfile(
+                "Target", "192.168.1.20", 5555, "", true, 27183));
+        assertTrue(AndroidClientValidation.isValidProfile(
+                "Target", "192.168.1.20", 5555, "", false, 0));
+        assertFalse(AndroidClientValidation.isValidProfile(
+                "Target", "192.168.1.20", 5555, "", true, 0));
+        assertFalse(AndroidClientValidation.isValidProfile(
+                "Target", "192.168.1.20", 5555, "", true, 5555));
+    }
 }

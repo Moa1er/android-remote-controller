@@ -16,8 +16,12 @@ import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -64,6 +68,8 @@ final class ScrcpyClient implements Closeable {
     private final InputStream serverAsset;
     private final Listener listener;
     private final AdbAuthKey authKey;
+    private final boolean directTcp;
+    private final int directTcpPort;
     private final boolean automaticResolution;
     private final int configuredMaxSize;
     private final AtomicBoolean stopped = new AtomicBoolean();
@@ -81,12 +87,17 @@ final class ScrcpyClient implements Closeable {
     private volatile AdbTransport.AdbStream shell;
     private volatile AdbTransport.AdbStream video;
     private volatile AdbTransport.AdbStream control;
+    private volatile Socket directVideoSocket;
+    private volatile Socket directControlSocket;
+    private volatile InputStream videoInput;
     private volatile ControlWriter controlWriter;
 
-    ScrcpyClient(InputStream serverAsset, AdbAuthKey authKey, boolean automaticResolution,
-            int configuredMaxSize, Listener listener) {
+    ScrcpyClient(InputStream serverAsset, AdbAuthKey authKey, boolean directTcp, int directTcpPort,
+            boolean automaticResolution, int configuredMaxSize, Listener listener) {
         this.serverAsset = serverAsset;
         this.authKey = authKey;
+        this.directTcp = directTcp;
+        this.directTcpPort = directTcpPort;
         this.automaticResolution = automaticResolution;
         this.configuredMaxSize = configuredMaxSize;
         this.listener = listener;
@@ -111,10 +122,13 @@ final class ScrcpyClient implements Closeable {
 
                 int scid = (int) (System.nanoTime() & 0x7fffffff);
                 String socketName = "scrcpy_" + String.format(Locale.US, "%08x", scid);
+                String tcpToken = directTcp ? createSessionToken() : null;
                 String command = "CLASSPATH=" + SERVER_PATH + " app_process / "
                         + "com.genymobile.scrcpy.Server 4.1"
                         + " scid=" + String.format(Locale.US, "%08x", scid)
-                        + " tunnel_forward=true"
+                        + (directTcp
+                        ? " tunnel_forward=false tcp_port=" + directTcpPort + " tcp_token=" + tcpToken
+                        : " tunnel_forward=true")
                         + " video_codec=h264 video_bit_rate=" + VIDEO_BIT_RATE
                         + " max_size=" + configuredMaxSize + " max_fps=" + VIDEO_MAX_FPS
                         + " audio=false control=true send_dummy_byte=false"
@@ -126,21 +140,32 @@ final class ScrcpyClient implements Closeable {
                 shellDrain.start();
 
                 listener.onStatus(R.string.status_opening_streams);
-                AdbTransport.AdbStream openedVideo = openLocalSocket(transport, socketName);
-                adoptVideo(openedVideo);
-                AdbTransport separateControlTransport = new AdbTransport(true);
-                adoptControlAdb(separateControlTransport);
-                separateControlTransport.connect(host, port, authKey);
-                AdbTransport.AdbStream openedControl = openLocalSocket(
-                        separateControlTransport, socketName);
-                adoptControl(openedControl);
+                InputStream openedVideoInput;
+                if (directTcp) {
+                    Socket openedVideo = openDirectSocket(host, directTcpPort, tcpToken);
+                    adoptDirectVideo(openedVideo);
+                    openedVideoInput = openedVideo.getInputStream();
+                    Socket openedControl = openDirectSocket(host, directTcpPort, tcpToken);
+                    adoptDirectControl(openedControl);
+                } else {
+                    AdbTransport.AdbStream openedVideo = openLocalSocket(transport, socketName);
+                    adoptVideo(openedVideo);
+                    openedVideoInput = new AdbInputStream(openedVideo);
+                    AdbTransport separateControlTransport = new AdbTransport(true);
+                    adoptControlAdb(separateControlTransport);
+                    separateControlTransport.connect(host, port, authKey);
+                    AdbTransport.AdbStream openedControl = openLocalSocket(
+                            separateControlTransport, socketName);
+                    adoptControl(openedControl);
+                }
 
-                int codecId = readIntBE(openedVideo);
+                videoInput = openedVideoInput;
+                int codecId = readIntBE(openedVideoInput);
                 if (codecId != 0x68323634) {
                     throw new IOException("Target returned unsupported video codec: 0x" + Integer.toHexString(codecId));
                 }
                 byte[] session = new byte[12];
-                openedVideo.readFully(session, 0, session.length);
+                readFully(openedVideoInput, session, 0, session.length);
                 if ((session[0] & 0x80) == 0) {
                     throw new IOException("Target did not send a scrcpy video session header");
                 }
@@ -149,7 +174,7 @@ final class ScrcpyClient implements Closeable {
                 AdbLimits.videoPixels(width, height);
                 listener.onConnected(width, height);
 
-                new Thread(() -> decodeVideo(surface, width, height, openedVideo), "scrcpy-video").start();
+                new Thread(() -> decodeVideo(surface, width, height, openedVideoInput), "scrcpy-video").start();
             } catch (Throwable error) {
                 fail(error);
             }
@@ -179,6 +204,27 @@ final class ScrcpyClient implements Closeable {
                 throw new IOException("Connection stopped");
             }
             video = stream;
+        }
+    }
+
+    private void adoptDirectVideo(Socket socket) throws IOException {
+        synchronized (lifecycleLock) {
+            if (stopped.get()) {
+                closeQuietly(socket);
+                throw new IOException("Connection stopped");
+            }
+            directVideoSocket = socket;
+        }
+    }
+
+    private void adoptDirectControl(Socket socket) throws IOException {
+        synchronized (lifecycleLock) {
+            if (stopped.get()) {
+                closeQuietly(socket);
+                throw new IOException("Connection stopped");
+            }
+            directControlSocket = socket;
+            controlWriter = new ControlWriter(socket.getOutputStream());
         }
     }
 
@@ -254,6 +300,42 @@ final class ScrcpyClient implements Closeable {
         throw lastError != null ? lastError : new IOException("Connection stopped");
     }
 
+    private Socket openDirectSocket(String host, int port, String token) throws IOException {
+        IOException lastError = null;
+        byte[] tokenBytes = token.getBytes(StandardCharsets.US_ASCII);
+        for (int attempt = 0; attempt < 60 && !stopped.get(); ++attempt) {
+            Socket socket = new Socket();
+            try {
+                socket.setTcpNoDelay(true);
+                socket.connect(new InetSocketAddress(host, port), 2_000);
+                OutputStream outputStream = socket.getOutputStream();
+                outputStream.write(tokenBytes);
+                outputStream.flush();
+                return socket;
+            } catch (IOException error) {
+                lastError = error;
+                closeQuietly(socket);
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while opening direct TCP socket", interrupted);
+                }
+            }
+        }
+        throw lastError != null ? lastError : new IOException("Connection stopped");
+    }
+
+    private static String createSessionToken() {
+        byte[] token = new byte[24];
+        new SecureRandom().nextBytes(token);
+        StringBuilder result = new StringBuilder(token.length * 2);
+        for (byte value : token) {
+            result.append(String.format(Locale.US, "%02x", value & 0xff));
+        }
+        return result.toString();
+    }
+
     private static void sendSync(AdbTransport.AdbStream stream, String id, byte[] payload) throws IOException {
         byte[] message = new byte[8 + payload.length];
         byte[] idBytes = id.getBytes(StandardCharsets.US_ASCII);
@@ -275,8 +357,7 @@ final class ScrcpyClient implements Closeable {
         }
     }
 
-    private void decodeVideo(Surface surface, int width, int height,
-            AdbTransport.AdbStream videoStream) {
+    private void decodeVideo(Surface surface, int width, int height, InputStream videoStream) {
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
         } catch (RuntimeException ignored) {
@@ -296,7 +377,7 @@ final class ScrcpyClient implements Closeable {
             byte[] packet = new byte[0];
             while (!stopped.get()) {
                 long packetStart = SystemClock.uptimeMillis();
-                videoStream.readFully(header, 0, header.length);
+                readFully(videoStream, header, 0, header.length);
                 long ptsAndFlags = readLongBE(header, 0);
                 int length = readIntBE(header, 8);
 
@@ -317,7 +398,7 @@ final class ScrcpyClient implements Closeable {
                 if (packet.length < length) {
                     packet = new byte[length];
                 }
-                videoStream.readFully(packet, 0, length);
+                readFully(videoStream, packet, 0, length);
                 long packetReadMillis = SystemClock.uptimeMillis() - packetStart;
                 if (automaticResolution) {
                     if (packetReadMillis >= VIDEO_SLOW_PACKET_MILLIS) {
@@ -707,22 +788,31 @@ final class ScrcpyClient implements Closeable {
         AdbTransport.AdbStream currentShell;
         AdbTransport currentAdb;
         AdbTransport currentControlAdb;
+        Socket currentDirectVideo;
+        Socket currentDirectControl;
         synchronized (lifecycleLock) {
             currentControl = control;
             currentVideo = video;
             currentShell = shell;
             currentAdb = adb;
             currentControlAdb = controlAdb;
+            currentDirectVideo = directVideoSocket;
+            currentDirectControl = directControlSocket;
             control = null;
             video = null;
             shell = null;
             adb = null;
             controlAdb = null;
+            directVideoSocket = null;
+            directControlSocket = null;
+            videoInput = null;
             controlWriter = null;
         }
         closeQuietly(currentControl);
         closeQuietly(currentVideo);
         closeQuietly(currentShell);
+        closeQuietly(currentDirectVideo);
+        closeQuietly(currentDirectControl);
         closeQuietly(serverAsset);
         if (currentAdb != null) {
             currentAdb.close();
@@ -746,9 +836,47 @@ final class ScrcpyClient implements Closeable {
         void execute() throws IOException;
     }
 
-    private static int readIntBE(AdbTransport.AdbStream stream) throws IOException {
+    private static final class AdbInputStream extends InputStream {
+        private final AdbTransport.AdbStream stream;
+
+        AdbInputStream(AdbTransport.AdbStream stream) {
+            this.stream = stream;
+        }
+
+        @Override
+        public int read() throws IOException {
+            return stream.readUnsignedByte();
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (length == 0) {
+                return 0;
+            }
+            stream.readFully(buffer, offset, length);
+            return length;
+        }
+
+        @Override
+        public void close() throws IOException {
+            stream.close();
+        }
+    }
+
+    private static void readFully(InputStream input, byte[] data, int offset, int length) throws IOException {
+        int read = 0;
+        while (read < length) {
+            int count = input.read(data, offset + read, length - read);
+            if (count < 0) {
+                throw new EOFException("Video stream closed");
+            }
+            read += count;
+        }
+    }
+
+    private static int readIntBE(InputStream stream) throws IOException {
         byte[] data = new byte[4];
-        stream.readFully(data, 0, 4);
+        readFully(stream, data, 0, 4);
         return readIntBE(data, 0);
     }
 

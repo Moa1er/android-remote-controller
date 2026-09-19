@@ -8,6 +8,11 @@ saved connections, video rendering, touch input, app launching, and adaptive
 resolution. It uses a separate ADB transport for controls, selects a hardware
 AVC decoder with low-latency settings when available, and uses a bandwidth-
 friendly 4 Mbps stream baseline without reducing the configured resolution.
+ADB forwarding is the default transport. Each saved connection may opt into a
+direct TCP video and control transport for lower latency, but that mode exposes
+a plaintext target-side port and should only be used on a trusted private
+network. Direct TCP uses a fresh session token and still uses ADB to start the
+temporary server.
 It builds the existing scrcpy server module included in this repository and
 uses the scrcpy video and control protocols. This repository is an independent
 project and is not maintained by Genymobile.
@@ -40,8 +45,9 @@ Run the checks with:
 
 Enable ADB over TCP on the target Android device, install the APK on the
 controller device, and add the target's local IP address and ADB port. The
-target and controller must be on a trusted network because ADB over TCP is not
-encrypted.
+target and controller must be on a trusted network. Keep the default ADB
+forwarding transport unless lower latency is more important than the additional
+network exposure of direct TCP.
 
 ## License
 

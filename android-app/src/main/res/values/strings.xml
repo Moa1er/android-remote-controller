@@ -6,10 +6,17 @@
     <string name="add_connection">+ Add connection</string>
     <string name="add_connection_subtitle">Add a trusted ADB-over-Wi-Fi device</string>
     <string name="actions_for">Actions for %1$s</string>
-    <string name="security_notice">ADB over Wi-Fi is unencrypted. Use this only on a trusted network. The target phone must have ADB over TCP enabled and may ask you to authorize this controller.</string>
+    <string name="security_notice">ADB forwarding is the default and requires ADB authorization on the target. Use Wi-Fi connections only on a trusted network. Direct TCP can improve latency but is less secure and is opt-in.</string>
     <string name="security_warning_title">Use only on a trusted network</string>
     <string name="security_warning_message">ADB over Wi-Fi is plaintext and does not authenticate the target to this controller. A device on the network could observe or impersonate the target. Continue only if this is a trusted network.</string>
     <string name="security_warning_acknowledge">I understand, connect</string>
+    <string name="direct_tcp_warning_title">Use less secure direct TCP?</string>
+    <string name="direct_tcp_warning_message">Direct TCP bypasses ADB stream forwarding and may improve responsiveness. It exposes a plaintext video and control port on the target network. A random session token protects this connection, but traffic is not encrypted and network peers can still probe or disrupt it. Use only on a trusted private network.</string>
+    <string name="direct_tcp_warning_acknowledge">I understand, use direct TCP</string>
+    <string name="transport_mode">Transport mode</string>
+    <string name="direct_tcp_port">Direct TCP port on target</string>
+    <string name="direct_tcp_port_hint">27183</string>
+    <string name="direct_tcp_short">Direct TCP:%1$d</string>
     <string name="cancel">Cancel</string>
     <string name="connect">Connect</string>
     <string name="edit">Edit</string>
@@ -44,6 +51,7 @@
     <string name="error_list_apps">Could not list apps: %1$s</string>
     <string name="error_open_app">Could not open app: %1$s</string>
     <string name="invalid_port">Enter a valid port.</string>
+    <string name="invalid_direct_tcp_port">Enter a valid direct TCP port.</string>
     <string name="invalid_connection">Enter a name, host, and valid port.</string>
     <string name="error_target_timeout">Target did not respond. Keep it powered on with ADB over TCP enabled, then retry.</string>
     <string name="error_target_unreachable">Target is unreachable. Check its Wi-Fi address and ADB port 5555.</string>
@@ -66,5 +74,9 @@
         <item>960p</item>
         <item>1280p</item>
         <item>1440p</item>
+    </string-array>
+    <string-array name="transport_choices">
+        <item>ADB forwarding (recommended)</item>
+        <item>Direct TCP (less secure)</item>
     </string-array>
 </resources>

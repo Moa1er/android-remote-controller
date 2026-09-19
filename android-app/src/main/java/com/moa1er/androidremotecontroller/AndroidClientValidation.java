@@ -20,6 +20,13 @@ final class AndroidClientValidation {
                 && (appPackage == null || appPackage.isEmpty() || isValidPackageName(appPackage));
     }
 
+    static boolean isValidProfile(String name, String host, int port, String appPackage,
+            boolean directTcp, int directTcpPort) {
+        return isValidProfile(name, host, port, appPackage)
+                && (!directTcp || (directTcpPort >= 1 && directTcpPort <= 65535
+                && directTcpPort != port));
+    }
+
     static boolean isValidVideoMaxSize(int maxSize) {
         return maxSize == 720 || maxSize == 960 || maxSize == 1280 || maxSize == 1440;
     }

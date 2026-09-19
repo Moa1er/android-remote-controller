@@ -38,6 +38,8 @@ public class Options {
     private float maxFps;
     private float angle;
     private boolean tunnelForward;
+    private int tcpPort = -1;
+    private String tcpToken;
     private Rect crop;
     private boolean control = true;
     private int displayId;
@@ -149,6 +151,14 @@ public class Options {
 
     public boolean isTunnelForward() {
         return tunnelForward;
+    }
+
+    public int getTcpPort() {
+        return tcpPort;
+    }
+
+    public String getTcpToken() {
+        return tcpToken;
     }
 
     public Rect getCrop() {
@@ -413,6 +423,18 @@ public class Options {
                     break;
                 case "tunnel_forward":
                     options.tunnelForward = Boolean.parseBoolean(value);
+                    break;
+                case "tcp_port":
+                    options.tcpPort = Integer.parseInt(value);
+                    if (options.tcpPort < 1 || options.tcpPort > 65535) {
+                        throw new IllegalArgumentException("Invalid TCP port: " + options.tcpPort);
+                    }
+                    break;
+                case "tcp_token":
+                    if (value.length() < 32 || value.length() > 128) {
+                        throw new IllegalArgumentException("Invalid direct TCP session token");
+                    }
+                    options.tcpToken = value;
                     break;
                 case "crop":
                     if (!value.isEmpty()) {

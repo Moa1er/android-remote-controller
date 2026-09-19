@@ -8,6 +8,7 @@ import android.media.MediaCodec;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -19,6 +20,7 @@ public final class Streamer {
     private static final long PACKET_FLAG_KEY_FRAME = 1L << 61;
 
     private final FileDescriptor fd;
+    private final OutputStream outputStream;
     private final Codec codec;
     private final boolean sendStreamMeta;
     private final boolean sendFrameMeta;
@@ -27,6 +29,15 @@ public final class Streamer {
 
     public Streamer(FileDescriptor fd, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
         this.fd = fd;
+        this.outputStream = null;
+        this.codec = codec;
+        this.sendStreamMeta = sendCodecMeta;
+        this.sendFrameMeta = sendFrameMeta;
+    }
+
+    public Streamer(OutputStream outputStream, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
+        this.fd = null;
+        this.outputStream = outputStream;
         this.codec = codec;
         this.sendStreamMeta = sendCodecMeta;
         this.sendFrameMeta = sendFrameMeta;
@@ -41,7 +52,7 @@ public final class Streamer {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             buffer.putInt(codec.getId());
             buffer.flip();
-            IO.writeFully(fd, buffer);
+            writeFully(buffer);
         }
     }
 
@@ -50,7 +61,7 @@ public final class Streamer {
             ByteBuffer buffer = ByteBuffer.allocate(4);
             buffer.putInt(codec.getId());
             buffer.flip();
-            IO.writeFully(fd, buffer);
+            writeFully(buffer);
         }
     }
 
@@ -62,7 +73,11 @@ public final class Streamer {
         if (error) {
             code[3] = 1;
         }
-        IO.writeFully(fd, code, 0, code.length);
+        if (outputStream != null) {
+            outputStream.write(code, 0, code.length);
+        } else {
+            IO.writeFully(fd, code, 0, code.length);
+        }
     }
 
     public void writePacket(ByteBuffer buffer, long pts, boolean config, boolean keyFrame) throws IOException {
@@ -75,10 +90,10 @@ public final class Streamer {
         }
 
         if (sendFrameMeta) {
-            writeFrameMeta(fd, buffer.remaining(), pts, config, keyFrame);
+            writeFrameMeta(buffer.remaining(), pts, config, keyFrame);
         }
 
-        IO.writeFully(fd, buffer);
+        writeFully(buffer);
     }
 
     public void writePacket(ByteBuffer codecBuffer, MediaCodec.BufferInfo bufferInfo) throws IOException {
@@ -100,11 +115,11 @@ public final class Streamer {
             headerBuffer.putInt(width);
             headerBuffer.putInt(height);
             headerBuffer.flip();
-            IO.writeFully(fd, headerBuffer);
+            writeFully(headerBuffer);
         }
     }
 
-    private void writeFrameMeta(FileDescriptor fd, int packetSize, long pts, boolean config, boolean keyFrame) throws IOException {
+    private void writeFrameMeta(int packetSize, long pts, boolean config, boolean keyFrame) throws IOException {
         headerBuffer.clear();
 
         long ptsAndFlags;
@@ -120,7 +135,18 @@ public final class Streamer {
         headerBuffer.putLong(ptsAndFlags);
         headerBuffer.putInt(packetSize);
         headerBuffer.flip();
-        IO.writeFully(fd, headerBuffer);
+        writeFully(headerBuffer);
+    }
+
+    private void writeFully(ByteBuffer buffer) throws IOException {
+        if (outputStream == null) {
+            IO.writeFully(fd, buffer);
+            return;
+        }
+
+        byte[] data = new byte[buffer.remaining()];
+        buffer.get(data);
+        outputStream.write(data);
     }
 
     private static void fixOpusConfigPacket(ByteBuffer buffer) throws IOException {

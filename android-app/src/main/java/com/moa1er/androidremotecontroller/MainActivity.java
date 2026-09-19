@@ -15,6 +15,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -43,8 +44,11 @@ public final class MainActivity extends Activity {
     private static final String TAG = "MainActivity";
     private static final String PREF_SECURITY_WARNING_ACKNOWLEDGED =
             "plaintext-adb-warning-acknowledged";
+    private static final String PREF_DIRECT_TCP_WARNING_ACKNOWLEDGED =
+            "direct-tcp-warning-acknowledged";
     private static final long MIN_LOADING_MILLIS = 300L;
     private static final int DEFAULT_VIDEO_MAX_SIZE = 1280;
+    private static final int DEFAULT_DIRECT_TCP_PORT = 27183;
     private static final int[] VIDEO_MAX_SIZES = {720, 960, 1280, 1440};
 
     private FrameLayout root;
@@ -160,6 +164,10 @@ public final class MainActivity extends Activity {
                     title.setText(profile.name);
                     title.setTextColor(Color.WHITE);
                     String destination = profile.host + ":" + profile.port;
+                    if (profile.directTcp) {
+                        destination += "  •  " + getString(R.string.direct_tcp_short,
+                                profile.directTcpPort);
+                    }
                     if (!profile.appPackage.isEmpty()) {
                         destination += "  •  " + profile.appPackage;
                     }
@@ -285,13 +293,21 @@ public final class MainActivity extends Activity {
     }
 
     private void connectToProfile(ConnectionProfile profile) {
-        if (!preferences.getBoolean(PREF_SECURITY_WARNING_ACKNOWLEDGED, false)) {
+        String warningPreference = profile.directTcp ? PREF_DIRECT_TCP_WARNING_ACKNOWLEDGED
+                : PREF_SECURITY_WARNING_ACKNOWLEDGED;
+        if (!preferences.getBoolean(warningPreference, false)) {
+            int title = profile.directTcp ? R.string.direct_tcp_warning_title
+                    : R.string.security_warning_title;
+            int message = profile.directTcp ? R.string.direct_tcp_warning_message
+                    : R.string.security_warning_message;
+            int acknowledge = profile.directTcp ? R.string.direct_tcp_warning_acknowledge
+                    : R.string.security_warning_acknowledge;
             new AlertDialog.Builder(this)
-                    .setTitle(R.string.security_warning_title)
-                    .setMessage(R.string.security_warning_message)
+                    .setTitle(title)
+                    .setMessage(message)
                     .setNegativeButton(R.string.cancel, null)
-                    .setPositiveButton(R.string.security_warning_acknowledge, (dialog, which) -> {
-                        preferences.edit().putBoolean(PREF_SECURITY_WARNING_ACKNOWLEDGED, true)
+                    .setPositiveButton(acknowledge, (dialog, which) -> {
+                        preferences.edit().putBoolean(warningPreference, true)
                                 .apply();
                         startConnection(profile);
                     })
@@ -327,7 +343,7 @@ public final class MainActivity extends Activity {
             return;
         }
         ScrcpyClient nextClient = new ScrcpyClient(server, currentAuthKey,
-                profile.automaticResolution, profile.maxSize,
+                profile.directTcp, profile.directTcpPort, profile.automaticResolution, profile.maxSize,
                 new ScrcpyClient.Listener() {
                     private boolean failed;
 
@@ -655,6 +671,52 @@ public final class MainActivity extends Activity {
         securityNotice.setPadding(0, 0, 0, dp(10));
         fields.addView(securityNotice, new LinearLayout.LayoutParams(-1, -2));
 
+        TextView transportLabel = new TextView(this);
+        transportLabel.setText(R.string.transport_mode);
+        transportLabel.setTextColor(Color.LTGRAY);
+        transportLabel.setTextSize(13);
+        fields.addView(transportLabel, new LinearLayout.LayoutParams(-1, dp(28)));
+
+        Spinner transportInput = new Spinner(this);
+        ArrayAdapter<CharSequence> transportAdapter = ArrayAdapter.createFromResource(this,
+                R.array.transport_choices, android.R.layout.simple_spinner_item);
+        transportAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        transportInput.setAdapter(transportAdapter);
+        transportInput.setSelection(existing != null && existing.directTcp ? 1 : 0);
+        fields.addView(transportInput, new LinearLayout.LayoutParams(-1, dp(56)));
+
+        TextView directPortLabel = new TextView(this);
+        directPortLabel.setText(R.string.direct_tcp_port);
+        directPortLabel.setTextColor(Color.LTGRAY);
+        directPortLabel.setTextSize(13);
+        fields.addView(directPortLabel, new LinearLayout.LayoutParams(-1, dp(28)));
+
+        EditText directPortInput = new EditText(this);
+        directPortInput.setHint(R.string.direct_tcp_port_hint);
+        directPortInput.setSingleLine(true);
+        directPortInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        directPortInput.setText(String.valueOf(existing == null ? DEFAULT_DIRECT_TCP_PORT
+                : existing.directTcpPort));
+        fields.addView(directPortInput, new LinearLayout.LayoutParams(-1, dp(56)));
+        int initialDirectVisibility = existing != null && existing.directTcp ? View.VISIBLE : View.GONE;
+        directPortLabel.setVisibility(initialDirectVisibility);
+        directPortInput.setVisibility(initialDirectVisibility);
+
+        transportInput.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                int visibility = position == 1 ? View.VISIBLE : View.GONE;
+                directPortLabel.setVisibility(visibility);
+                directPortInput.setVisibility(visibility);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+                directPortLabel.setVisibility(View.GONE);
+                directPortInput.setVisibility(View.GONE);
+            }
+        });
+
         EditText nameInput = new EditText(this);
         nameInput.setHint(R.string.connection_name_hint);
         nameInput.setSingleLine(true);
@@ -725,21 +787,32 @@ public final class MainActivity extends Activity {
                         return;
                     }
                     String appPackage = appInput.getText().toString().trim();
+                    boolean directTcp = transportInput.getSelectedItemPosition() == 1;
+                    int directTcpPort;
+                    try {
+                        directTcpPort = Integer.parseInt(directPortInput.getText().toString().trim());
+                    } catch (NumberFormatException e) {
+                        showToast(R.string.invalid_direct_tcp_port);
+                        return;
+                    }
                     boolean automaticResolution = automaticResolutionInput.isChecked();
                     int maxSize = VIDEO_MAX_SIZES[maxResolutionInput.getSelectedItemPosition()];
-                    if (!AndroidClientValidation.isValidProfile(name, host, port, appPackage)
+                    if (!AndroidClientValidation.isValidProfile(name, host, port, appPackage,
+                            directTcp, directTcpPort)
                             || !AndroidClientValidation.isValidVideoMaxSize(maxSize)) {
                         showToast(R.string.invalid_connection);
                         return;
                     }
                     if (existing == null) {
                         profiles.add(new ConnectionProfile(name, host, port, appPackage,
-                                automaticResolution, maxSize));
+                                directTcp, directTcpPort, automaticResolution, maxSize));
                     } else {
                         existing.name = name;
                         existing.host = host;
                         existing.port = port;
                         existing.appPackage = appPackage;
+                        existing.directTcp = directTcp;
+                        existing.directTcpPort = directTcpPort;
                         existing.automaticResolution = automaticResolution;
                         existing.maxSize = maxSize;
                     }
@@ -795,12 +868,15 @@ public final class MainActivity extends Activity {
                 String host = item.getString("host");
                 int port = item.getInt("port");
                 String appPackage = item.optString("appPackage", "");
+                boolean directTcp = item.optBoolean("directTcp", false);
+                int directTcpPort = item.optInt("directTcpPort", DEFAULT_DIRECT_TCP_PORT);
                 boolean automaticResolution = item.optBoolean("automaticResolution", false);
                 int maxSize = item.optInt("maxSize", DEFAULT_VIDEO_MAX_SIZE);
-                if (AndroidClientValidation.isValidProfile(name, host, port, appPackage)
+                if (AndroidClientValidation.isValidProfile(name, host, port, appPackage,
+                        directTcp, directTcpPort)
                         && AndroidClientValidation.isValidVideoMaxSize(maxSize)) {
                     profiles.add(new ConnectionProfile(name, host, port, appPackage,
-                            automaticResolution, maxSize));
+                            directTcp, directTcpPort, automaticResolution, maxSize));
                 }
             }
         } catch (Exception ignored) {
@@ -812,7 +888,7 @@ public final class MainActivity extends Activity {
         JSONArray array = new JSONArray();
         for (ConnectionProfile profile : profiles) {
             if (!AndroidClientValidation.isValidProfile(profile.name, profile.host,
-                    profile.port, profile.appPackage)
+                    profile.port, profile.appPackage, profile.directTcp, profile.directTcpPort)
                     || !AndroidClientValidation.isValidVideoMaxSize(profile.maxSize)) {
                 continue;
             }
@@ -822,6 +898,8 @@ public final class MainActivity extends Activity {
                 item.put("host", profile.host);
                 item.put("port", profile.port);
                 item.put("appPackage", profile.appPackage);
+                item.put("directTcp", profile.directTcp);
+                item.put("directTcpPort", profile.directTcpPort);
                 item.put("automaticResolution", profile.automaticResolution);
                 item.put("maxSize", profile.maxSize);
                 array.put(item);
@@ -912,15 +990,19 @@ public final class MainActivity extends Activity {
         String host;
         int port;
         String appPackage;
+        boolean directTcp;
+        int directTcpPort;
         boolean automaticResolution;
         int maxSize;
 
-        ConnectionProfile(String name, String host, int port, String appPackage,
-                boolean automaticResolution, int maxSize) {
+        ConnectionProfile(String name, String host, int port, String appPackage, boolean directTcp,
+                int directTcpPort, boolean automaticResolution, int maxSize) {
             this.name = name;
             this.host = host;
             this.port = port;
             this.appPackage = appPackage == null ? "" : appPackage;
+            this.directTcp = directTcp;
+            this.directTcpPort = directTcpPort;
             this.automaticResolution = automaticResolution;
             this.maxSize = maxSize;
         }

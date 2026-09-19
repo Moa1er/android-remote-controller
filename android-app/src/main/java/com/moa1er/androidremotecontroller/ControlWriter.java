@@ -2,12 +2,20 @@ package com.moa1er.androidremotecontroller;
 
 import android.view.KeyEvent;
 import java.io.IOException;
+import java.io.OutputStream;
 
 final class ControlWriter {
     private final AdbTransport.AdbStream stream;
+    private final OutputStream outputStream;
 
     ControlWriter(AdbTransport.AdbStream stream) {
         this.stream = stream;
+        this.outputStream = null;
+    }
+
+    ControlWriter(OutputStream outputStream) {
+        this.stream = null;
+        this.outputStream = outputStream;
     }
 
     synchronized void touch(int action, float x, float y, float pressure, int width, int height) throws IOException {
@@ -22,7 +30,7 @@ final class ControlWriter {
         writeShortBE(data, 22, Math.round(Math.max(0, Math.min(1, pressure)) * 65535));
         writeIntBE(data, 24, 0);
         writeIntBE(data, 28, 0);
-        stream.write(data);
+        write(data);
     }
 
     synchronized void sendBack() throws IOException {
@@ -34,11 +42,11 @@ final class ControlWriter {
         byte[] data = new byte[5];
         data[0] = 23;
         writeIntBE(data, 1, maxSize);
-        stream.write(data);
+        write(data);
     }
 
     synchronized void wake() throws IOException {
-        stream.write(new byte[]{10, 1});
+        write(new byte[]{10, 1});
     }
 
     private void sendKey(int action, int keycode, int repeat, int metaState) throws IOException {
@@ -48,7 +56,16 @@ final class ControlWriter {
         writeIntBE(data, 2, keycode);
         writeIntBE(data, 6, repeat);
         writeIntBE(data, 10, metaState);
-        stream.write(data);
+        write(data);
+    }
+
+    private void write(byte[] data) throws IOException {
+        if (stream != null) {
+            stream.write(data);
+        } else {
+            outputStream.write(data);
+            outputStream.flush();
+        }
     }
 
     private static void writeShortBE(byte[] data, int offset, int value) {
