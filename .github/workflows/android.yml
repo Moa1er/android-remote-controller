@@ -90,6 +90,10 @@ jobs:
           heap-size: 512M
           disable-animations: true
           script: |
+            adb shell settings put global stay_on_while_plugged_in 7
+            adb shell svc power stayon true
             adb shell input keyevent KEYCODE_WAKEUP
+            adb shell input keyevent KEYCODE_MENU
             adb shell wm dismiss-keyguard || true
+            adb shell input keyevent KEYCODE_HOME
             ./gradlew :android-app:connectedDebugAndroidTest
