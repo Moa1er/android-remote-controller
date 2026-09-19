@@ -5,6 +5,8 @@ import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Process;
 import android.os.SystemClock;
 import android.util.Log;
@@ -28,6 +30,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -70,11 +74,20 @@ final class ScrcpyClient implements Closeable {
     private final AdbAuthKey authKey;
     private final boolean directTcp;
     private final int directTcpPort;
+    private final boolean useH265;
     private final boolean automaticResolution;
     private final int configuredMaxSize;
     private final AtomicBoolean stopped = new AtomicBoolean();
     private final Object lifecycleLock = new Object();
-    private final ExecutorService controlExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService controlExecutor = Executors.newSingleThreadExecutor(runnable ->
+            new Thread(() -> {
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+                } catch (RuntimeException ignored) {
+                    // control input can still make progress with its inherited priority.
+                }
+                runnable.run();
+            }, "scrcpy-control"));
     private final Object touchLock = new Object();
     private TouchEvent pendingMove;
     private boolean moveDrainQueued;
@@ -93,11 +106,12 @@ final class ScrcpyClient implements Closeable {
     private volatile ControlWriter controlWriter;
 
     ScrcpyClient(InputStream serverAsset, AdbAuthKey authKey, boolean directTcp, int directTcpPort,
-            boolean automaticResolution, int configuredMaxSize, Listener listener) {
+            boolean useH265, boolean automaticResolution, int configuredMaxSize, Listener listener) {
         this.serverAsset = serverAsset;
         this.authKey = authKey;
         this.directTcp = directTcp;
         this.directTcpPort = directTcpPort;
+        this.useH265 = useH265;
         this.automaticResolution = automaticResolution;
         this.configuredMaxSize = configuredMaxSize;
         this.listener = listener;
@@ -123,13 +137,16 @@ final class ScrcpyClient implements Closeable {
                 int scid = (int) (System.nanoTime() & 0x7fffffff);
                 String socketName = "scrcpy_" + String.format(Locale.US, "%08x", scid);
                 String tcpToken = directTcp ? createSessionToken() : null;
+                String videoCodec = useH265
+                        && findHardwareDecoder(MediaFormat.MIMETYPE_VIDEO_HEVC) != null
+                        ? "h265" : "h264";
                 String command = "CLASSPATH=" + SERVER_PATH + " app_process / "
                         + "com.genymobile.scrcpy.Server 4.1"
                         + " scid=" + String.format(Locale.US, "%08x", scid)
                         + (directTcp
                         ? " tunnel_forward=false tcp_port=" + directTcpPort + " tcp_token=" + tcpToken
                         : " tunnel_forward=true")
-                        + " video_codec=h264 video_bit_rate=" + VIDEO_BIT_RATE
+                        + " video_codec=" + videoCodec + " video_bit_rate=" + VIDEO_BIT_RATE
                         + " max_size=" + configuredMaxSize + " max_fps=" + VIDEO_MAX_FPS
                         + " audio=false control=true send_dummy_byte=false"
                         + " send_device_meta=false send_stream_meta=true send_frame_meta=true"
@@ -161,8 +178,14 @@ final class ScrcpyClient implements Closeable {
 
                 videoInput = openedVideoInput;
                 int codecId = readIntBE(openedVideoInput);
-                if (codecId != 0x68323634) {
-                    throw new IOException("Target returned unsupported video codec: 0x" + Integer.toHexString(codecId));
+                String videoMimeType;
+                if (codecId == 0x68323634) {
+                    videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC;
+                } else if (codecId == 0x68323635) {
+                    videoMimeType = MediaFormat.MIMETYPE_VIDEO_HEVC;
+                } else {
+                    throw new IOException("Target returned unsupported video codec: 0x"
+                            + Integer.toHexString(codecId));
                 }
                 byte[] session = new byte[12];
                 readFully(openedVideoInput, session, 0, session.length);
@@ -174,7 +197,9 @@ final class ScrcpyClient implements Closeable {
                 AdbLimits.videoPixels(width, height);
                 listener.onConnected(width, height);
 
-                new Thread(() -> decodeVideo(surface, width, height, openedVideoInput), "scrcpy-video").start();
+                String selectedVideoMimeType = videoMimeType;
+                new Thread(() -> decodeVideo(surface, width, height, openedVideoInput,
+                        selectedVideoMimeType), "scrcpy-video").start();
             } catch (Throwable error) {
                 fail(error);
             }
@@ -357,22 +382,27 @@ final class ScrcpyClient implements Closeable {
         }
     }
 
-    private void decodeVideo(Surface surface, int width, int height, InputStream videoStream) {
+    private void decodeVideo(Surface surface, int width, int height, InputStream videoStream,
+            String videoMimeType) {
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
         } catch (RuntimeException ignored) {
             // a decoder thread can still make progress with its inherited priority.
         }
-        MediaCodec decoder = null;
-        boolean firstFrameReported = false;
+        AsyncVideoDecoder decoder = null;
+        AtomicBoolean firstFrameReported = new AtomicBoolean();
         Throwable failure = null;
         int currentMaxSize = configuredMaxSize;
         int slowPacketCount = 0;
         long stableSince = SystemClock.uptimeMillis();
         long lastResolutionChange = 0L;
         try {
-            decoder = createDecoder(surface, width, height);
-            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            decoder = new AsyncVideoDecoder(surface, width, height, videoMimeType, () -> {
+                if (firstFrameReported.compareAndSet(false, true)) {
+                    listener.onVideoStarted();
+                    listener.onStatus(R.string.status_video_rendering, width, height);
+                }
+            });
             byte[] header = new byte[12];
             byte[] packet = new byte[0];
             while (!stopped.get()) {
@@ -385,8 +415,13 @@ final class ScrcpyClient implements Closeable {
                     int newWidth = (int) ptsAndFlags;
                     int newHeight = length;
                     AdbLimits.videoPixels(newWidth, newHeight);
-                    releaseDecoder(decoder);
-                    decoder = createDecoder(surface, newWidth, newHeight);
+                    decoder.close();
+                    decoder = new AsyncVideoDecoder(surface, newWidth, newHeight, videoMimeType, () -> {
+                        if (firstFrameReported.compareAndSet(false, true)) {
+                            listener.onVideoStarted();
+                            listener.onStatus(R.string.status_video_rendering, newWidth, newHeight);
+                        }
+                    });
                     listener.onVideoSizeChanged(newWidth, newHeight);
                     slowPacketCount = 0;
                     stableSince = SystemClock.uptimeMillis();
@@ -427,36 +462,16 @@ final class ScrcpyClient implements Closeable {
                     }
                 }
 
-                int index;
-                do {
-                    index = decoder.dequeueInputBuffer(10000);
-                    if (index < 0) {
-                        drainDecoder(decoder, info);
-                    }
-                } while (index < 0 && !stopped.get());
-                if (index < 0) {
-                    break;
-                }
-                java.nio.ByteBuffer input = decoder.getInputBuffer(index);
-                if (input == null || input.capacity() < length) {
-                    throw new IOException("MediaCodec input buffer is too small");
-                }
-                input.clear();
-                input.put(packet, 0, length);
                 int flags = (ptsAndFlags & (1L << 62)) != 0 ? MediaCodec.BUFFER_FLAG_CODEC_CONFIG : 0;
                 long ptsUs = ptsAndFlags & ((1L << 61) - 1);
-                decoder.queueInputBuffer(index, 0, length, ptsUs, flags);
-                int rendered = drainDecoder(decoder, info);
-                if (!firstFrameReported && rendered > 0) {
-                    firstFrameReported = true;
-                    listener.onVideoStarted();
-                    listener.onStatus(R.string.status_video_rendering, width, height);
-                }
+                decoder.queue(packet, length, ptsUs, flags);
             }
         } catch (Throwable error) {
             failure = error;
         } finally {
-            releaseDecoder(decoder);
+            if (decoder != null) {
+                decoder.close();
+            }
             if (failure != null) {
                 fail(failure);
             } else if (!stopped.get()) {
@@ -465,10 +480,11 @@ final class ScrcpyClient implements Closeable {
         }
     }
 
-    private static MediaCodec createDecoder(Surface surface, int width, int height)
-            throws IOException {
+    private static MediaCodec createDecoder(Surface surface, int width, int height,
+            String videoMimeType,
+            MediaCodec.Callback callback, Handler callbackHandler) throws IOException {
         MediaFormat format = MediaFormat.createVideoFormat(
-                MediaFormat.MIMETYPE_VIDEO_AVC, width, height);
+                videoMimeType, width, height);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1);
         }
@@ -476,19 +492,21 @@ final class ScrcpyClient implements Closeable {
             format.setInteger(MediaFormat.KEY_PRIORITY, 0);
         }
 
-        String decoderName = findHardwareDecoder();
+        String decoderName = findHardwareDecoder(videoMimeType);
         MediaCodec decoder = null;
         try {
             decoder = decoderName == null
-                    ? MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    ? MediaCodec.createDecoderByType(videoMimeType)
                     : MediaCodec.createByCodecName(decoderName);
+            decoder.setCallback(callback, callbackHandler);
             decoder.configure(format, surface, null, 0);
             decoder.start();
             return decoder;
         } catch (Exception error) {
             releaseDecoder(decoder);
             try {
-                decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
+                decoder = MediaCodec.createDecoderByType(videoMimeType);
+                decoder.setCallback(callback, callbackHandler);
                 decoder.configure(format, surface, null, 0);
                 decoder.start();
                 return decoder;
@@ -500,7 +518,7 @@ final class ScrcpyClient implements Closeable {
         }
     }
 
-    private static String findHardwareDecoder() {
+    private static String findHardwareDecoder(String videoMimeType) {
         String fallback = null;
         try {
             MediaCodecList codecList = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
@@ -510,7 +528,7 @@ final class ScrcpyClient implements Closeable {
                 }
                 boolean supportsAvc = false;
                 for (String type : codecInfo.getSupportedTypes()) {
-                    if (MediaFormat.MIMETYPE_VIDEO_AVC.equalsIgnoreCase(type)) {
+                        if (videoMimeType.equalsIgnoreCase(type)) {
                         supportsAvc = true;
                         break;
                     }
@@ -554,17 +572,112 @@ final class ScrcpyClient implements Closeable {
         }
     }
 
-    private static int drainDecoder(MediaCodec decoder, MediaCodec.BufferInfo info) {
-        int rendered = 0;
-        for (;;) {
-            int output = decoder.dequeueOutputBuffer(info, 0);
-            if (output >= 0) {
-                decoder.releaseOutputBuffer(output, true);
-                ++rendered;
-            } else if (output == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
-                    || output == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                return rendered;
+    private final class AsyncVideoDecoder implements Closeable {
+        private final HandlerThread callbackThread =
+                new HandlerThread("scrcpy-decode", Process.THREAD_PRIORITY_DISPLAY);
+        private final Handler callbackHandler;
+        private final BlockingQueue<Integer> inputBuffers = new LinkedBlockingQueue<>();
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private final Runnable onFirstFrame;
+        private volatile Throwable failure;
+        private MediaCodec decoder;
+
+        AsyncVideoDecoder(Surface surface, int width, int height, String videoMimeType,
+                Runnable onFirstFrame)
+                throws IOException {
+            this.onFirstFrame = onFirstFrame;
+            callbackThread.start();
+            callbackHandler = new Handler(callbackThread.getLooper());
+            MediaCodec.Callback callback = new MediaCodec.Callback() {
+                @Override
+                public void onInputBufferAvailable(MediaCodec codec, int index) {
+                    if (!closed.get()) {
+                        inputBuffers.offer(index);
+                    }
+                }
+
+                @Override
+                public void onOutputBufferAvailable(MediaCodec codec, int index,
+                        MediaCodec.BufferInfo info) {
+                    if (closed.get()) {
+                        return;
+                    }
+                    try {
+                        codec.releaseOutputBuffer(index, true);
+                        if (info.size > 0) {
+                            onFirstFrame.run();
+                        }
+                    } catch (Throwable error) {
+                        setFailure(error);
+                    }
+                }
+
+                @Override
+                public void onError(MediaCodec codec, MediaCodec.CodecException error) {
+                    setFailure(error);
+                }
+
+                @Override
+                public void onOutputFormatChanged(MediaCodec codec, MediaFormat format) {
+                }
+            };
+            try {
+                decoder = createDecoder(surface, width, height, videoMimeType, callback,
+                        callbackHandler);
+            } catch (IOException | RuntimeException error) {
+                close();
+                throw error;
             }
+        }
+
+        void queue(byte[] data, int length, long ptsUs, int flags) throws IOException {
+            while (!closed.get()) {
+                checkFailure();
+                try {
+                    Integer index = inputBuffers.poll(100, TimeUnit.MILLISECONDS);
+                    if (index == null) {
+                        continue;
+                    }
+                    java.nio.ByteBuffer input = decoder.getInputBuffer(index);
+                    if (input == null || input.capacity() < length) {
+                        throw new IOException("MediaCodec input buffer is too small");
+                    }
+                    input.clear();
+                    input.put(data, 0, length);
+                    decoder.queueInputBuffer(index, 0, length, ptsUs, flags);
+                    return;
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while queueing video", interrupted);
+                } catch (IllegalStateException error) {
+                    setFailure(error);
+                    checkFailure();
+                }
+            }
+            throw new IOException("Video decoder stopped");
+        }
+
+        private void setFailure(Throwable error) {
+            if (failure == null) {
+                failure = error;
+            }
+        }
+
+        private void checkFailure() throws IOException {
+            Throwable error = failure;
+            if (error != null) {
+                throw new IOException("Video decoder failed", error);
+            }
+        }
+
+        @Override
+        public void close() {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+            inputBuffers.clear();
+            releaseDecoder(decoder);
+            callbackThread.quitSafely();
         }
     }
 
@@ -590,6 +703,13 @@ final class ScrcpyClient implements Closeable {
             }
         }
         TouchEvent event = new TouchEvent(action, x, y, pressure, width, height);
+        if (directTcp) {
+            // direct sockets do not wait for an ADB write acknowledgement, so keep every
+            // accepted move instead of coalescing it behind the ADB safety path.
+            enqueueControl(() -> writer.touch(event.action, event.x, event.y,
+                    event.pressure, event.width, event.height));
+            return;
+        }
         if (action == MotionEvent.ACTION_MOVE) {
             // do not let delayed ADB acknowledgements build a stale move backlog.
             synchronized (touchLock) {

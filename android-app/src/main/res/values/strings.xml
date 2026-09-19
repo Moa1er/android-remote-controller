@@ -3,6 +3,7 @@
     <string name="saved_connections">Saved connections</string>
     <string name="automatic_resolution">Automatic resolution</string>
     <string name="max_video_size">Maximum video size</string>
+    <string name="use_h265">Use H.265 when supported, lower network use</string>
     <string name="add_connection">+ Add connection</string>
     <string name="add_connection_subtitle">Add a trusted ADB-over-Wi-Fi device</string>
     <string name="actions_for">Actions for %1$s</string>

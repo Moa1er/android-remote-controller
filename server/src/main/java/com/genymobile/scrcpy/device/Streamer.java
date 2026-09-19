@@ -26,6 +26,7 @@ public final class Streamer {
     private final boolean sendFrameMeta;
 
     private final ByteBuffer headerBuffer = ByteBuffer.allocate(12);
+    private byte[] outputBuffer = new byte[0];
 
     public Streamer(FileDescriptor fd, Codec codec, boolean sendCodecMeta, boolean sendFrameMeta) {
         this.fd = fd;
@@ -144,9 +145,12 @@ public final class Streamer {
             return;
         }
 
-        byte[] data = new byte[buffer.remaining()];
-        buffer.get(data);
-        outputStream.write(data);
+        int length = buffer.remaining();
+        if (outputBuffer.length < length) {
+            outputBuffer = new byte[length];
+        }
+        buffer.get(outputBuffer, 0, length);
+        outputStream.write(outputBuffer, 0, length);
     }
 
     private static void fixOpusConfigPacket(ByteBuffer buffer) throws IOException {

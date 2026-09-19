@@ -10,9 +10,11 @@ with Android Keystore in private app storage, pushes the matching scrcpy server
 to the target, and renders the target video with Android `MediaCodec`. It uses
 one authenticated ADB connection for the shell and video stream, and a second
 one for control input so video traffic does not delay touch events.
-The client also prefers a hardware AVC decoder with low-latency settings and
-uses a 4 Mbps stream baseline to reduce wireless queueing without lowering the
-configured video resolution.
+The client prefers a hardware AVC or HEVC decoder with low-latency settings
+and uses a 4 Mbps stream baseline to reduce wireless queueing without lowering
+the configured video resolution. H.265 can be enabled per connection when the
+controller and target support it, which reduces network traffic at the same
+resolution.
 
 ## Build
 
@@ -87,6 +89,9 @@ With an emulator already running, run the instrumentation test with:
    resolution is enabled. Choosing 720p leaves no range for adaptation, so it
    behaves like a fixed 720p stream. Disable Automatic resolution to select a
    fixed maximum video size.
+8. Leave Use H.265 enabled on compatible phones for lower network use. Disable
+   it if the target does not provide an H.265 encoder or if H.264 is smoother
+   on a particular device.
 
 The connection editor explains the network and authorization requirements. Do
 not use an ADB TCP endpoint on a network you do not trust. The target address,

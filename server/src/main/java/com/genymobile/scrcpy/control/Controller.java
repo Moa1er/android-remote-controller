@@ -25,6 +25,7 @@ import com.genymobile.scrcpy.wrappers.ServiceManager;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Process;
 import android.os.SystemClock;
 import android.util.Pair;
 import android.view.InputDevice;
@@ -277,6 +278,11 @@ public class Controller implements AsyncProcessor, VirtualDisplayListener {
         }
 
         thread = new Thread(() -> {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+            } catch (RuntimeException ignored) {
+                // the control thread can still make progress with its inherited priority
+            }
             try {
                 control();
             } catch (IOException e) {

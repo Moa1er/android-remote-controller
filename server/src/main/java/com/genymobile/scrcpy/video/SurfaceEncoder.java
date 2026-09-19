@@ -18,6 +18,7 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.os.Build;
 import android.os.Looper;
+import android.os.Process;
 import android.os.SystemClock;
 import android.view.Surface;
 
@@ -350,6 +351,11 @@ public class SurfaceEncoder implements AsyncProcessor {
     @Override
     public void start(TerminationListener listener) {
         thread = new Thread(() -> {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY);
+            } catch (RuntimeException ignored) {
+                // the encoder can still make progress with its inherited priority
+            }
             // Some devices (Meizu) deadlock if the video encoding thread has no Looper
             // <https://github.com/Genymobile/scrcpy/issues/4143>
             Looper.prepare();

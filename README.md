@@ -6,16 +6,19 @@ TCP when a desktop computer is not available.
 The controller app implements the Android-side ADB transport, authentication,
 saved connections, video rendering, touch input, app launching, and adaptive
 resolution. It uses a separate ADB transport for controls, selects a hardware
-AVC decoder with low-latency settings when available, and uses a bandwidth-
-friendly 4 Mbps stream baseline without reducing the configured resolution.
+AVC or HEVC decoder with low-latency settings when available, and uses a
+bandwidth-friendly 4 Mbps stream baseline without reducing the configured
+resolution.
 ADB forwarding is the default transport. Each saved connection may opt into a
 direct TCP video and control transport for lower latency, but that mode exposes
 a plaintext target-side port and should only be used on a trusted private
 network. Direct TCP uses a fresh session token and still uses ADB to start the
 temporary server.
 It builds the existing scrcpy server module included in this repository and
-uses the scrcpy video and control protocols. This repository is an independent
-project and is not maintained by Genymobile.
+uses the scrcpy video and control protocols. The connection editor can prefer
+H.265 when the controller has a hardware decoder, reducing network traffic at
+the same configured resolution. This repository is an independent project and
+is not maintained by Genymobile.
 
 ## Build
 

@@ -49,6 +49,7 @@ public final class MainActivity extends Activity {
     private static final long MIN_LOADING_MILLIS = 300L;
     private static final int DEFAULT_VIDEO_MAX_SIZE = 1280;
     private static final int DEFAULT_DIRECT_TCP_PORT = 27183;
+    private static final boolean DEFAULT_USE_H265 = true;
     private static final int[] VIDEO_MAX_SIZES = {720, 960, 1280, 1440};
 
     private FrameLayout root;
@@ -343,7 +344,8 @@ public final class MainActivity extends Activity {
             return;
         }
         ScrcpyClient nextClient = new ScrcpyClient(server, currentAuthKey,
-                profile.directTcp, profile.directTcpPort, profile.automaticResolution, profile.maxSize,
+                profile.directTcp, profile.directTcpPort, profile.useH265,
+                profile.automaticResolution, profile.maxSize,
                 new ScrcpyClient.Listener() {
                     private boolean failed;
 
@@ -765,6 +767,12 @@ public final class MainActivity extends Activity {
         maxResolutionInput.setSelection(videoMaxSizeSelection(selectedMaxSize));
         fields.addView(maxResolutionInput, new LinearLayout.LayoutParams(-1, dp(56)));
 
+        CheckBox h265Input = new CheckBox(this);
+        h265Input.setText(R.string.use_h265);
+        h265Input.setTextColor(Color.WHITE);
+        h265Input.setChecked(existing == null ? DEFAULT_USE_H265 : existing.useH265);
+        fields.addView(h265Input, new LinearLayout.LayoutParams(-1, dp(56)));
+
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.addView(fields);
@@ -797,6 +805,7 @@ public final class MainActivity extends Activity {
                     }
                     boolean automaticResolution = automaticResolutionInput.isChecked();
                     int maxSize = VIDEO_MAX_SIZES[maxResolutionInput.getSelectedItemPosition()];
+                    boolean useH265 = h265Input.isChecked();
                     if (!AndroidClientValidation.isValidProfile(name, host, port, appPackage,
                             directTcp, directTcpPort)
                             || !AndroidClientValidation.isValidVideoMaxSize(maxSize)) {
@@ -805,7 +814,7 @@ public final class MainActivity extends Activity {
                     }
                     if (existing == null) {
                         profiles.add(new ConnectionProfile(name, host, port, appPackage,
-                                directTcp, directTcpPort, automaticResolution, maxSize));
+                                directTcp, directTcpPort, useH265, automaticResolution, maxSize));
                     } else {
                         existing.name = name;
                         existing.host = host;
@@ -813,6 +822,7 @@ public final class MainActivity extends Activity {
                         existing.appPackage = appPackage;
                         existing.directTcp = directTcp;
                         existing.directTcpPort = directTcpPort;
+                        existing.useH265 = useH265;
                         existing.automaticResolution = automaticResolution;
                         existing.maxSize = maxSize;
                     }
@@ -870,13 +880,14 @@ public final class MainActivity extends Activity {
                 String appPackage = item.optString("appPackage", "");
                 boolean directTcp = item.optBoolean("directTcp", false);
                 int directTcpPort = item.optInt("directTcpPort", DEFAULT_DIRECT_TCP_PORT);
+                boolean useH265 = item.optBoolean("useH265", DEFAULT_USE_H265);
                 boolean automaticResolution = item.optBoolean("automaticResolution", false);
                 int maxSize = item.optInt("maxSize", DEFAULT_VIDEO_MAX_SIZE);
                 if (AndroidClientValidation.isValidProfile(name, host, port, appPackage,
                         directTcp, directTcpPort)
                         && AndroidClientValidation.isValidVideoMaxSize(maxSize)) {
                     profiles.add(new ConnectionProfile(name, host, port, appPackage,
-                            directTcp, directTcpPort, automaticResolution, maxSize));
+                            directTcp, directTcpPort, useH265, automaticResolution, maxSize));
                 }
             }
         } catch (Exception ignored) {
@@ -898,9 +909,10 @@ public final class MainActivity extends Activity {
                 item.put("host", profile.host);
                 item.put("port", profile.port);
                 item.put("appPackage", profile.appPackage);
-                item.put("directTcp", profile.directTcp);
-                item.put("directTcpPort", profile.directTcpPort);
-                item.put("automaticResolution", profile.automaticResolution);
+            item.put("directTcp", profile.directTcp);
+            item.put("directTcpPort", profile.directTcpPort);
+            item.put("useH265", profile.useH265);
+            item.put("automaticResolution", profile.automaticResolution);
                 item.put("maxSize", profile.maxSize);
                 array.put(item);
             } catch (Exception ignored) {
@@ -992,17 +1004,19 @@ public final class MainActivity extends Activity {
         String appPackage;
         boolean directTcp;
         int directTcpPort;
+        boolean useH265;
         boolean automaticResolution;
         int maxSize;
 
         ConnectionProfile(String name, String host, int port, String appPackage, boolean directTcp,
-                int directTcpPort, boolean automaticResolution, int maxSize) {
+                int directTcpPort, boolean useH265, boolean automaticResolution, int maxSize) {
             this.name = name;
             this.host = host;
             this.port = port;
             this.appPackage = appPackage == null ? "" : appPackage;
             this.directTcp = directTcp;
             this.directTcpPort = directTcpPort;
+            this.useH265 = useH265;
             this.automaticResolution = automaticResolution;
             this.maxSize = maxSize;
         }
